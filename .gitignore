@@ -1,0 +1,58 @@
+# Entornos virtuales de Python
+venv/
+env/
+.venv/
+.env/
+
+# Archivos compilados de Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Dependencias de Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+package-lock.json   # opcional, si prefieres no compartir el lockfile
+yarn.lock
+
+# Archivos de configuración local
+.env.local
+.env.*.local
+config.py.local
+
+# Bases de datos locales
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs
+*.log
+logs/
+flask_app.log
+
+# IDE y editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store (macOS)
+Thumbs.db (Windows)
+
+# Archivos de sesión o temporales
+*.tmp
+*.temp
+*.pid
+
+# Archivos generados por Flask/SocketIO
+instance/
+socketio_trace/
+
+# Evitar subir archivos de credenciales
+*.pem
+*.key
+*.crt
+.secrets
