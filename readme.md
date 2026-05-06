@@ -1,6 +1,6 @@
 # Laboratorio 2: Mensajeria privada en tiempo real
 
-**Estudiante:** [Completar nombre]  
+**Estudiantes:** Mateo Criollo - Eduardo García - Mateo Iza 
 **Fecha:** 06/05/2026
 
 ## Descripcion
