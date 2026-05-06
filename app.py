@@ -1,6 +1,8 @@
+import time
+
 from flask import Flask, render_template, request, send_from_directory
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 
 
 # Inicializar la app Flask.
@@ -13,8 +15,13 @@ CORS(app)  # Permitir solicitudes desde cualquier origen en desarrollo.
 # que no es compatible con el Python 3.14 usado por este entorno.
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
-# Diccionario para asociar el id de sesion con el nombre de usuario.
+# Diccionario para asociar el id de sesion con usuario y sala activa.
 usuarios = {}
+
+# Metadatos temporales para confirmaciones de lectura.
+# No se guarda el contenido del mensaje, solo datos minimos de enrutamiento.
+mensajes_activos = {}
+TTL_PERMITIDOS = {10, 60, 300}
 
 
 @app.route('/')
@@ -32,59 +39,150 @@ def socketio_client():
     )
 
 
+def normalizar_texto(valor):
+    """Convierte un valor recibido desde el cliente en texto seguro para usar."""
+    return str(valor or '').strip()
+
+
+def usuarios_en_sala(room):
+    """Devuelve los nombres de usuarios conectados a una sala especifica."""
+    return [
+        data['username']
+        for data in usuarios.values()
+        if data.get('room') == room
+    ]
+
+
+def emitir_lista_sala(room):
+    """Actualiza la lista de conectados para todos los clientes de una sala."""
+    emit('room_user_list', usuarios_en_sala(room), room=room)
+
+
+def olvidar_mensaje(message_id):
+    """Elimina metadatos temporales de un mensaje expirado."""
+    mensajes_activos.pop(message_id, None)
+
+
 @socketio.on('connect')
 def handle_connect():
     """Se ejecuta cuando un cliente abre una conexion Socket.IO."""
     print(f'Cliente conectado: {request.sid}')
 
 
-@socketio.on('set_username')
-def handle_set_username(data):
-    """Guarda el nombre elegido por el cliente y avisa a los demas."""
-    username = str(data.get('username', '')).strip() or 'Anonimo'
-    usuarios[request.sid] = username
+@socketio.on('join_private_room')
+def handle_join_private_room(data):
+    """Registra al cliente en una sala privada."""
+    username = normalizar_texto(data.get('username'))
+    room = normalizar_texto(data.get('room'))
 
-    emit('user_joined', {'username': username}, broadcast=True, include_self=False)
-    emit('user_list', list(usuarios.values()), broadcast=True)
-
-
-@socketio.on('chat_message')
-def handle_chat_message(data):
-    """Recibe un mensaje de un cliente y lo reenvia a todos."""
-    username = usuarios.get(request.sid)
-    mensaje = str(data.get('message', '')).strip()
-
-    if not username or not mensaje:
+    if not username or not room:
+        emit('join_error', {
+            'message': 'Debes ingresar un nombre de usuario y una sala privada.'
+        })
         return
 
-    emit('chat_message', {
+    sesion_anterior = usuarios.get(request.sid)
+    if sesion_anterior:
+        leave_room(sesion_anterior['room'])
+
+    join_room(room)
+    usuarios[request.sid] = {
         'username': username,
+        'room': room,
+    }
+
+    emit('joined_private_room', {'username': username, 'room': room})
+    emit('user_joined', {'username': username}, room=room, include_self=False)
+    emitir_lista_sala(room)
+
+
+@socketio.on('private_message')
+def handle_private_message(data):
+    """Recibe un mensaje privado y lo reenvia solo a la sala del emisor."""
+    sesion = usuarios.get(request.sid)
+    mensaje = normalizar_texto(data.get('message'))
+    message_id = normalizar_texto(data.get('messageId'))
+
+    try:
+        ttl = int(data.get('ttl', 60))
+    except (TypeError, ValueError):
+        ttl = 60
+
+    if not sesion or not mensaje or not message_id or ttl not in TTL_PERMITIDOS:
+        return
+
+    room = sesion['room']
+    mensajes_activos[message_id] = {
+        'sender_sid': request.sid,
+        'room': room,
+        'ttl': ttl,
+        'read_by': set(),
+    }
+
+    emit('private_message', {
+        'messageId': message_id,
+        'username': sesion['username'],
         'message': mensaje,
-        'timestamp': data.get('timestamp', '')
-    }, broadcast=True)
+        'timestamp': data.get('timestamp', ''),
+        'ttl': ttl,
+    }, room=room)
+
+
+@socketio.on('message_read')
+def handle_message_read(data):
+    """Envia confirmacion de lectura solamente al emisor original."""
+    sesion = usuarios.get(request.sid)
+    message_id = normalizar_texto(data.get('messageId'))
+    metadata = mensajes_activos.get(message_id)
+
+    if not sesion or not metadata:
+        return
+
+    if metadata['room'] != sesion['room'] or metadata['sender_sid'] == request.sid:
+        return
+
+    if request.sid in metadata['read_by']:
+        return
+
+    metadata['read_by'].add(request.sid)
+    read_at = time.time()
+    expires_at = read_at + metadata['ttl']
+    socketio.start_background_task(
+        lambda: (socketio.sleep(metadata['ttl']), olvidar_mensaje(message_id))
+    )
+
+    emit('message_read', {
+        'messageId': message_id,
+        'reader': sesion['username'],
+        'ttl': metadata['ttl'],
+        'readAt': read_at,
+        'expiresAt': expires_at,
+    }, to=metadata['sender_sid'])
 
 
 @socketio.on('leave_chat')
 def handle_leave_chat():
-    """Quita al cliente del chat sin cerrar la pagina web."""
-    username = usuarios.pop(request.sid, None)
+    """Quita al cliente de su sala privada sin cerrar la pagina web."""
+    sesion = usuarios.pop(request.sid, None)
 
-    if not username:
+    if not sesion:
         return
 
-    emit('user_left', {'username': username}, broadcast=True, include_self=False)
-    emit('user_list', list(usuarios.values()), broadcast=True)
+    room = sesion['room']
+    leave_room(room)
+    emit('user_left', {'username': sesion['username']}, room=room, include_self=False)
+    emitir_lista_sala(room)
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Se ejecuta cuando un cliente cierra la conexion."""
-    username = usuarios.pop(request.sid, None)
-    print(f'Cliente desconectado: {request.sid} ({username})')
+    sesion = usuarios.pop(request.sid, None)
+    print(f'Cliente desconectado: {request.sid} ({sesion})')
 
-    if username:
-        emit('user_left', {'username': username}, broadcast=True)
-        emit('user_list', list(usuarios.values()), broadcast=True)
+    if sesion:
+        emit('user_left', {'username': sesion['username']}, room=sesion['room'])
+        emitir_lista_sala(sesion['room'])
 
 
 if __name__ == '__main__':

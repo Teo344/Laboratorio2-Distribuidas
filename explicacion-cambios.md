@@ -1,628 +1,340 @@
-# Explicacion de los cambios del chat con Flask-SocketIO y Web Components
+# Explicacion de cambios aplicados para el Laboratorio 2
 
-Este documento resume el proceso de correccion y mejora del proyecto de chat. La aplicacion quedo compuesta por un servidor Flask con Flask-SocketIO y un cliente web hecho con Web Components nativos.
+Este documento describe los cambios realizados para transformar el chat grupal inicial en una aplicacion de mensajeria privada en tiempo real con Flask, Flask-SocketIO, Web Components, salas privadas, mensajes temporales y confirmaciones de lectura.
 
-## 1. Problema inicial
+## 1. Cambio de enfoque
 
-El servicio tenia varios problemas:
+El proyecto original funcionaba como un chat grupal global. Todos los usuarios conectados compartian la misma conversacion.
 
-- El servidor no arrancaba correctamente con la configuracion anterior.
-- El cliente web intentaba cargar Socket.IO desde `/socket.io/socket.io.js`, lo que provocaba un error `400`.
-- No existia una opcion para salir del chat desde la interfaz.
-- Al refrescar el navegador se perdia el usuario y el historial visual.
-- El diseno era funcional, pero podia hacerse mas minimalista y enfocado al chat.
+El laboratorio solicita un sistema mas cercano a Signal, por lo que se aplicaron estos cambios:
 
-## 2. Cambios en dependencias
+- Ingreso con usuario y sala privada.
+- Mensajes enviados solo a usuarios de la misma sala.
+- Mensajes temporales con TTL.
+- Confirmaciones de lectura al emisor original.
+- Eliminacion de historial persistente de mensajes.
+- Interfaz minima enfocada en privacidad.
 
-En `requirements.txt` se reemplazo `eventlet` por `simple-websocket`.
+## 2. Cambios en `app.py`
 
-Antes:
+### Salas privadas
 
-```text
-eventlet==0.33.3
-```
-
-Ahora:
-
-```text
-simple-websocket>=1.0.0
-```
-
-Esto se hizo porque el entorno usa Python 3.14 y `eventlet` presentaba problemas de compatibilidad. Para desarrollo local, `simple-websocket` junto con el modo `threading` funciona correctamente.
-
-## 3. Cambios en el servidor Flask
-
-El servidor esta en `app.py`.
-
-La aplicacion Flask se crea asi:
+Se importaron funciones de Flask-SocketIO:
 
 ```python
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'tu_clave_secreta_aqui'
-CORS(app)
+from flask_socketio import SocketIO, emit, join_room, leave_room
 ```
 
-Despues se inicializa Socket.IO:
+Ahora el servidor usa `join_room(room)` y `leave_room(room)` para separar conversaciones.
+
+Antes el servidor guardaba:
 
 ```python
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
+usuarios[request.sid] = username
 ```
 
-El cambio importante es `async_mode="threading"`. Esto evita depender de `eventlet` y permite que el servidor funcione en el entorno actual.
-
-## 4. Ruta principal
-
-La ruta `/` entrega la interfaz web:
+Ahora guarda:
 
 ```python
-@app.route('/')
-def index():
-    return render_template('index.html')
-```
-
-Cuando el usuario abre:
-
-```text
-http://localhost:5000
-```
-
-Flask responde con `templates/index.html`.
-
-## 5. Correccion del cliente Socket.IO en el navegador
-
-El navegador necesita cargar la libreria cliente de Socket.IO para poder usar la funcion global `io()`.
-
-Inicialmente se usaba:
-
-```html
-<script src="/socket.io/socket.io.js"></script>
-```
-
-Esto causo el error:
-
-```text
-The client is using an unsupported version of the Socket.IO or Engine.IO protocols
-```
-
-El motivo es que, en Flask-SocketIO, `/socket.io/...` no es una ruta para servir archivos JavaScript. Esa ruta pertenece al protocolo interno de Socket.IO.
-
-Para solucionarlo, se agrego esta ruta en `app.py`:
-
-```python
-@app.route('/vendor/socket.io.min.js')
-def socketio_client():
-    return send_from_directory(
-        'node_modules/socket.io-client/dist',
-        'socket.io.min.js',
-    )
-```
-
-Y en `templates/index.html` ahora se carga asi:
-
-```html
-<script src="{{ url_for('socketio_client') }}"></script>
-```
-
-De esta manera el navegador carga correctamente el cliente Socket.IO desde `node_modules`.
-
-## 6. Eventos Socket.IO del servidor
-
-El servidor guarda los usuarios conectados en memoria:
-
-```python
-usuarios = {}
-```
-
-La clave es `request.sid`, que identifica una conexion Socket.IO. El valor es el nombre del usuario.
-
-Ejemplo conceptual:
-
-```python
-{
-    "id_de_socket_1": "Ana",
-    "id_de_socket_2": "Luis"
+usuarios[request.sid] = {
+    'username': username,
+    'room': room,
 }
 ```
 
-## 7. Conexion de clientes
+Esto permite saber en que sala esta cada cliente.
 
-Cuando un cliente abre la conexion:
+### Evento `join_private_room`
 
-```python
-@socketio.on('connect')
-def handle_connect():
-    print(f'Cliente conectado: {request.sid}')
-```
-
-Aqui todavia no se guarda usuario, porque el navegador primero debe enviar el nombre.
-
-## 8. Registro de nombre
-
-Cuando el cliente envia su nombre:
+Se reemplazo el ingreso simple por un ingreso privado:
 
 ```python
-@socketio.on('set_username')
-def handle_set_username(data):
-    username = str(data.get('username', '')).strip() or 'Anonimo'
-    usuarios[request.sid] = username
-
-    emit('user_joined', {'username': username}, broadcast=True, include_self=False)
-    emit('user_list', list(usuarios.values()), broadcast=True)
+@socketio.on('join_private_room')
+def handle_join_private_room(data):
 ```
 
-Este evento hace tres cosas:
+El cliente debe enviar:
 
-1. Limpia el nombre recibido.
-2. Guarda el usuario asociado al `request.sid`.
-3. Notifica a los demas usuarios y actualiza la lista de conectados.
+```json
+{
+  "username": "Ana",
+  "room": "sala1"
+}
+```
 
-## 9. Envio de mensajes
+El servidor valida que ambos campos existan, une el socket a la sala y actualiza la lista de usuarios de esa sala.
 
-Cuando un usuario manda un mensaje:
+### Mensajes privados
+
+El evento de mensajes ahora es:
 
 ```python
-@socketio.on('chat_message')
-def handle_chat_message(data):
-    username = usuarios.get(request.sid)
-    mensaje = str(data.get('message', '')).strip()
-
-    if not username or not mensaje:
-        return
-
-    emit('chat_message', {
-        'username': username,
-        'message': mensaje,
-        'timestamp': data.get('timestamp', '')
-    }, broadcast=True)
+@socketio.on('private_message')
+def handle_private_message(data):
 ```
 
-El servidor valida que:
+Cada mensaje incluye:
 
-- El usuario este registrado.
-- El mensaje no este vacio.
+- `messageId`
+- `message`
+- `timestamp`
+- `ttl`
 
-Si todo esta bien, retransmite el mensaje a todos los clientes conectados.
-
-## 10. Salida manual del chat
-
-Se agrego un evento nuevo:
+El servidor valida que el usuario este registrado y que el TTL sea permitido:
 
 ```python
-@socketio.on('leave_chat')
-def handle_leave_chat():
-    username = usuarios.pop(request.sid, None)
-
-    if not username:
-        return
-
-    emit('user_left', {'username': username}, broadcast=True, include_self=False)
-    emit('user_list', list(usuarios.values()), broadcast=True)
+TTL_PERMITIDOS = {10, 60, 300}
 ```
 
-Este evento permite salir del chat sin cerrar la pagina. El servidor elimina al usuario de la lista y avisa a los demas clientes.
-
-## 11. Desconexion
-
-Si el usuario cierra la pestana, refresca la pagina o pierde conexion:
+Luego retransmite el mensaje solo a la sala:
 
 ```python
-@socketio.on('disconnect')
-def handle_disconnect():
-    username = usuarios.pop(request.sid, None)
-    print(f'Cliente desconectado: {request.sid} ({username})')
-
-    if username:
-        emit('user_left', {'username': username}, broadcast=True)
-        emit('user_list', list(usuarios.values()), broadcast=True)
+emit('private_message', {...}, room=room)
 ```
 
-Esto limpia el usuario del diccionario `usuarios`.
+### Metadatos temporales
 
-## 12. HTML principal
+El servidor no guarda historial de mensajes. Solo guarda metadatos temporales para poder enviar confirmaciones de lectura:
 
-El archivo `templates/index.html` quedo muy simple:
+```python
+mensajes_activos[message_id] = {
+    'sender_sid': request.sid,
+    'room': room,
+    'ttl': ttl,
+    'read_by': set(),
+}
+```
+
+No se guarda el texto del mensaje.
+
+El TTL no se activa al enviar el mensaje. Se activa cuando el receptor emite `message_read`. En ese momento se programa la eliminacion del metadato:
+
+```python
+socketio.start_background_task(
+    lambda: (socketio.sleep(ttl), olvidar_mensaje(message_id))
+)
+```
+
+### Confirmacion de lectura
+
+Se agrego:
+
+```python
+@socketio.on('message_read')
+def handle_message_read(data):
+```
+
+Cuando un receptor lee un mensaje, el servidor busca el emisor original y le envia:
+
+```python
+emit('message_read', {
+    'messageId': message_id,
+    'reader': sesion['username'],
+    'ttl': metadata['ttl'],
+    'expiresAt': expires_at,
+}, to=metadata['sender_sid'])
+```
+
+La confirmacion no se envia a toda la sala, solo al emisor.
+
+### Salida de sala
+
+El evento `leave_chat` ahora saca al usuario de su sala:
+
+```python
+leave_room(room)
+```
+
+Luego actualiza la lista de conectados de esa sala.
+
+## 3. Cambios en `static/chat-app.js`
+
+### Web Component
+
+La interfaz sigue implementada como Web Component:
+
+```javascript
+class ChatApp extends HTMLElement
+customElements.define('chat-app', ChatApp);
+```
+
+El componente usa Shadow DOM para encapsular HTML, CSS y comportamiento:
+
+```javascript
+this.attachShadow({ mode: 'open' });
+```
+
+### Pantalla de ingreso privada
+
+El formulario ahora pide:
+
+- Nombre de usuario.
+- Codigo de sala.
+
+El cliente emite:
+
+```javascript
+this.socket.emit('join_private_room', {
+    username: this.username,
+    room: this.room
+});
+```
+
+### Selector de TTL
+
+El formulario de mensajes incluye un selector:
 
 ```html
-<!doctype html>
-<html lang="es">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Chat con WebSockets</title>
-    <script src="{{ url_for('socketio_client') }}"></script>
-    <script type="module" src="{{ url_for('static', filename='chat-app.js') }}"></script>
-</head>
-<body>
-    <chat-app></chat-app>
-</body>
-</html>
+<select data-ttl-select>
+    <option value="10">10s</option>
+    <option value="60">1min</option>
+    <option value="300">5min</option>
+</select>
 ```
 
-La pagina solo carga:
+Al enviar, el cliente incluye el TTL:
 
-- El cliente Socket.IO.
-- El modulo JavaScript del Web Component.
-- La etiqueta personalizada `<chat-app>`.
+```javascript
+ttl: Number(this.ttlSelect.value)
+```
 
-## 13. Que es el Web Component
+### IDs unicos por mensaje
 
-El cliente web esta en `static/chat-app.js`.
+Cada mensaje se envia con:
 
-Se usa un Web Component para encapsular toda la interfaz y comportamiento del chat dentro de una etiqueta personalizada:
+```javascript
+messageId: crypto.randomUUID()
+```
+
+Ese ID sirve para:
+
+- Identificar el mensaje en la interfaz.
+- Asociar confirmaciones de lectura.
+- Eliminar el mensaje correcto al expirar.
+
+### Cuenta regresiva
+
+Cuando llega un mensaje, se renderiza una burbuja, pero el temporizador no empieza inmediatamente. El mensaje queda esperando lectura.
+
+En el receptor, despues de renderizar y marcar el mensaje como leido, se inicia:
+
+```javascript
+this.startExpirationTimer(data.messageId, Number(data.ttl));
+```
+
+En el emisor, el temporizador inicia cuando recibe el evento `message_read`.
+
+Cada segundo se actualiza el texto y una barra de progreso:
+
+```text
+Se elimina en 10s
+```
+
+Cuando llega a cero, el mensaje se elimina del DOM.
+
+### Confirmacion de lectura
+
+Cuando el cliente recibe un mensaje que no es suyo:
+
+```javascript
+this.socket.emit('message_read', { messageId: data.messageId });
+```
+
+Cuando el emisor recibe la confirmacion:
+
+```javascript
+this.markMessageAsRead(data.messageId, data.reader);
+```
+
+El estado visual ya no usa texto. Cambia de un icono de palomita simple a un icono de doble palomita verde:
+
+```text
+palomita simple -> doble palomita verde
+```
+
+### Privacidad en `localStorage`
+
+Antes existia historial local. Para cumplir mejor con el laboratorio, ya no se guardan mensajes en `localStorage`.
+
+Ahora solo se guardan:
+
+```javascript
+chat.username
+chat.room
+```
+
+Esto permite restaurar la sesion al refrescar, sin conservar contenido de mensajes.
+
+## 4. Cambios en `templates/index.html`
+
+El HTML principal carga:
+
+```html
+<script src="{{ url_for('socketio_client') }}"></script>
+<script type="module" src="{{ url_for('static', filename='chat-app.js') }}"></script>
+```
+
+Luego usa el componente:
 
 ```html
 <chat-app></chat-app>
 ```
 
-En JavaScript se registra asi:
+La interfaz vive dentro del Web Component.
 
-```javascript
-customElements.define('chat-app', ChatApp);
+## 5. Eventos Socket.IO actuales
+
+```text
+connect
+join_private_room
+joined_private_room
+join_error
+room_user_list
+user_joined
+user_left
+private_message
+message_read
+leave_chat
+disconnect
 ```
 
-La clase principal es:
+## 6. Flujo final
 
-```javascript
-class ChatApp extends HTMLElement {
+```text
+1. Usuario abre la pagina.
+2. Cliente conecta con Socket.IO.
+3. Usuario ingresa nombre y sala.
+4. Cliente emite join_private_room.
+5. Servidor une el socket a la sala.
+6. Servidor envia lista de usuarios de esa sala.
+7. Usuario envia mensaje con TTL.
+8. Servidor retransmite solo a esa sala.
+9. Clientes renderizan el mensaje sin iniciar todavia el TTL.
+10. Receptor emite message_read.
+11. Servidor envia confirmacion solo al emisor.
+12. Receptor y emisor inician la cuenta regresiva.
+13. Al terminar el TTL contado desde lectura, cada cliente elimina el mensaje.
+14. Servidor elimina metadatos temporales del mensaje.
 ```
 
-Esto le dice al navegador que `ChatApp` es un elemento HTML personalizado.
-
-## 14. Template y Shadow DOM
-
-El componente crea una plantilla:
-
-```javascript
-const template = document.createElement('template');
-template.innerHTML = `...`;
-```
-
-Dentro de esa plantilla estan:
-
-- Los estilos CSS.
-- El panel de mensajes.
-- El formulario de envio.
-- El formulario de usuario.
-- La lista de conectados.
-- El boton `Salir`.
-- El boton `Limpiar historial`.
-
-En el constructor se crea el Shadow DOM:
-
-```javascript
-this.attachShadow({ mode: 'open' });
-this.shadowRoot.appendChild(template.content.cloneNode(true));
-```
-
-El Shadow DOM encapsula el componente. Sus estilos viven dentro del componente y no se mezclan con CSS externo.
-
-## 15. Estado interno del componente
-
-El componente guarda referencias importantes:
-
-```javascript
-this.socket = null;
-this.username = this.loadStoredUsername();
-this.messages = this.shadowRoot.querySelector('[data-messages]');
-this.users = this.shadowRoot.querySelector('[data-users]');
-this.usernameInput = this.shadowRoot.querySelector('[data-username-input]');
-this.leaveButton = this.shadowRoot.querySelector('[data-leave-button]');
-```
-
-Esto permite manipular la interfaz sin buscar elementos repetidamente.
-
-## 16. Ciclo de vida del componente
-
-Cuando el componente aparece en pantalla, se ejecuta:
-
-```javascript
-connectedCallback() {
-    this.usernameForm.addEventListener('submit', this.handleUsernameSubmit);
-    this.messageForm.addEventListener('submit', this.handleMessageSubmit);
-    this.leaveButton.addEventListener('click', this.handleLeaveClick);
-    this.clearHistoryButton.addEventListener('click', this.handleClearHistoryClick);
-    this.renderStoredHistory();
-    this.connectSocket();
-}
-```
-
-Aqui se conectan los eventos de la interfaz, se restaura el historial local y se abre la conexion Socket.IO.
-
-Cuando el componente se retira de la pagina, se ejecuta:
-
-```javascript
-disconnectedCallback()
-```
-
-Alli se eliminan los listeners y se desconecta el socket.
-
-## 17. Entrada al chat desde el navegador
-
-Cuando el usuario escribe su nombre y presiona `Entrar`, se ejecuta:
-
-```javascript
-handleUsernameSubmit = (event) => {
-    event.preventDefault();
-
-    const username = this.usernameInput.value.trim();
-    if (!username || !this.socket?.connected) {
-        return;
-    }
-
-    this.username = username;
-    this.saveStoredUsername(username);
-    this.socket.emit('set_username', { username });
-    this.setChatActive(true);
-    this.messageInput.focus();
-    this.addNotice(`Bienvenido, ${username}`);
-};
-```
-
-Este proceso:
-
-1. Evita que el formulario recargue la pagina.
-2. Toma el nombre del input.
-3. Guarda el nombre en memoria.
-4. Guarda el nombre en `localStorage`.
-5. Envia el evento `set_username` al servidor.
-6. Activa el formulario de mensajes.
-
-## 18. Envio de mensajes desde el navegador
-
-Cuando el usuario envia un mensaje:
-
-```javascript
-handleMessageSubmit = (event) => {
-    event.preventDefault();
-
-    const message = this.messageInput.value.trim();
-    if (!message || !this.username || !this.socket?.connected) {
-        return;
-    }
-
-    this.socket.emit('chat_message', {
-        message,
-        timestamp: new Date().toLocaleTimeString()
-    });
-    this.messageInput.value = '';
-    this.messageInput.focus();
-};
-```
-
-El mensaje no se pinta directamente al enviarlo. Primero se manda al servidor. Luego el servidor lo retransmite y el cliente lo recibe por el evento `chat_message`.
-
-Esto mantiene el mismo flujo para todos los clientes.
-
-## 19. Conexion Socket.IO en el cliente
-
-El metodo `connectSocket()` crea la conexion:
-
-```javascript
-this.socket = io({
-    transports: ['websocket', 'polling']
-});
-```
-
-Luego registra eventos:
-
-```javascript
-this.socket.on('connect', () => { ... });
-this.socket.on('disconnect', () => { ... });
-this.socket.on('user_joined', (data) => { ... });
-this.socket.on('user_left', (data) => { ... });
-this.socket.on('user_list', (users) => { ... });
-this.socket.on('chat_message', (data) => { ... });
-```
-
-Estos eventos mantienen sincronizada la interfaz con el servidor.
-
-## 20. Restauracion al refrescar
-
-Al refrescar el navegador, la conexion anterior se pierde. Eso es normal.
-
-Para mejorar la experiencia, se guarda el nombre en `localStorage`:
-
-```javascript
-const STORAGE_KEYS = {
-    username: 'chat.username',
-    history: 'chat.history'
-};
-```
-
-Cuando el componente se crea:
-
-```javascript
-this.username = this.loadStoredUsername();
-this.usernameInput.value = this.username;
-```
-
-Cuando Socket.IO conecta:
-
-```javascript
-if (this.username) {
-    this.socket.emit('set_username', { username: this.username });
-    this.setChatActive(true);
-    this.addNotice(`Sesion restaurada como ${this.username}`);
-}
-```
-
-Asi, si el usuario refresca la pagina, el navegador vuelve a registrarse automaticamente con el nombre guardado.
-
-## 21. Historial local
-
-El historial se guarda en el navegador usando `localStorage`.
-
-La cantidad maxima de mensajes guardados es:
-
-```javascript
-const MAX_STORED_MESSAGES = 100;
-```
-
-Cuando llega un mensaje, se pinta con `addMessage()` y se guarda:
-
-```javascript
-if (options.persist !== false) {
-    this.rememberMessage(data);
-}
-```
-
-El metodo `rememberMessage()` agrega el mensaje al historial:
-
-```javascript
-rememberMessage(data) {
-    const history = this.loadStoredHistory();
-    history.push({
-        username: data.username || 'Desconocido',
-        message: data.message || '',
-        timestamp: data.timestamp || ''
-    });
-    this.saveStoredHistory(history.slice(-MAX_STORED_MESSAGES));
-}
-```
-
-El uso de `slice(-MAX_STORED_MESSAGES)` evita guardar mensajes infinitamente.
-
-## 22. Limpiar historial
-
-Se agrego el boton:
-
-```html
-<button class="secondary" type="button" data-clear-history-button>Limpiar historial</button>
-```
-
-Cuando se presiona:
-
-```javascript
-handleClearHistoryClick = () => {
-    this.saveStoredHistory([]);
-    this.messages.replaceChildren();
-    this.addNotice('Historial local limpiado');
-};
-```
-
-Esto borra el historial guardado y limpia la pantalla de mensajes.
-
-## 23. Salir del chat desde el cliente web
-
-El boton:
-
-```html
-<button class="secondary" type="button" data-leave-button disabled>Salir</button>
-```
-
-ejecuta:
-
-```javascript
-handleLeaveClick = () => {
-    if (!this.username || !this.socket?.connected) {
-        return;
-    }
-
-    const username = this.username;
-    this.socket.emit('leave_chat');
-    this.username = '';
-    this.removeStoredUsername();
-    this.setChatActive(false);
-    this.users.replaceChildren();
-    this.addNotice(`${username} salio del chat`);
-    this.usernameInput.focus();
-};
-```
-
-Esto:
-
-1. Envia `leave_chat` al servidor.
-2. Borra el usuario en memoria.
-3. Borra el usuario guardado en `localStorage`.
-4. Desactiva el chat.
-5. Limpia la lista local de conectados.
-6. Permite volver a entrar con otro nombre.
-
-## 24. Control de estado visual
-
-El metodo `setChatActive()` centraliza la activacion y desactivacion de controles:
-
-```javascript
-setChatActive(isActive, options = {}) {
-    if (!isActive && !options.keepUsername) {
-        this.usernameInput.value = '';
-    }
-
-    this.usernameInput.disabled = isActive;
-    this.usernameButton.disabled = isActive || !this.socket?.connected;
-    this.leaveButton.disabled = !isActive;
-    this.messageInput.disabled = !isActive;
-    this.messageButton.disabled = !isActive;
-}
-```
-
-Esto evita repetir logica en varios lugares.
-
-## 25. Diseno minimalista
-
-El diseno se definio dentro del Web Component, en el bloque `<style>`.
-
-Se aplicaron estos criterios:
-
-- Fondo claro y neutro.
-- Paneles blancos con borde suave.
-- Menos sombras.
-- Mensajes propios alineados a la derecha.
-- Mensajes ajenos alineados a la izquierda.
-- Punto visual para estado conectado/desconectado.
-- Sidebar simple con usuario, acciones y conectados.
-- Vista responsive para pantallas pequenas.
-
-## 26. Flujo completo actual
-
-El flujo final es:
-
-1. El usuario abre `http://localhost:5000`.
-2. Flask entrega `index.html`.
-3. El HTML carga el cliente Socket.IO desde `/vendor/socket.io.min.js`.
-4. El HTML carga `static/chat-app.js`.
-5. El navegador registra el Web Component `<chat-app>`.
-6. El componente crea su Shadow DOM.
-7. El componente restaura nombre e historial desde `localStorage`.
-8. El componente abre conexion Socket.IO.
-9. Si habia usuario guardado, se registra automaticamente.
-10. El servidor guarda el usuario en `usuarios`.
-11. El servidor emite la lista de conectados.
-12. El usuario envia mensajes.
-13. El servidor retransmite los mensajes.
-14. El cliente pinta mensajes y guarda historial local.
-15. Si el usuario refresca, se restaura el nombre y el historial local.
-16. Si el usuario presiona `Salir`, se elimina del servidor y se borra el usuario guardado.
-
-## 27. Limitaciones actuales
-
-El historial actual es local por navegador. Esto significa:
-
-- No se comparte entre usuarios.
-- No se conserva si se borran los datos del navegador.
-- No se conserva entre distintos navegadores o dispositivos.
-- No sobrevive como historial global si se reinicia el servidor.
-
-Para un chat mas avanzado, se podria agregar:
-
-- Historial en memoria del servidor.
-- Persistencia en una base de datos.
-- Salas de chat.
-- Autenticacion real de usuarios.
-- Confirmacion de entrega de mensajes.
-- Indicador de escritura.
-
-## 28. Resumen
-
-El proyecto paso de ser un chat basico con problemas de arranque y carga del cliente Socket.IO a una aplicacion mas estable y completa:
-
-- Servidor Flask-SocketIO funcionando en modo `threading`.
-- Cliente Socket.IO cargado correctamente desde una ruta Flask.
-- Web Component nativo para encapsular interfaz, estilos y comportamiento.
-- Boton para salir del chat.
-- Diseno mas minimalista.
-- Restauracion de nombre con `localStorage`.
-- Historial local limitado a 100 mensajes.
-- Boton para limpiar historial.
-
-La arquitectura actual es simple, entendible y adecuada para una practica de WebSockets/Socket.IO con Flask y cliente web moderno.
+## 7. Verificaciones realizadas
+
+Se verifico:
+
+- Sintaxis JavaScript con `node --check static/chat-app.js`.
+- Entrada de usuarios a salas distintas.
+- Aislamiento de mensajes por sala.
+- Confirmacion de lectura al emisor original.
+- Salida de sala.
+- Bloqueo de mensajes despues de salir.
+
+## 8. Resultado
+
+El proyecto quedo adaptado al Laboratorio 2:
+
+- Mensajeria privada por sala.
+- Mensajes temporales.
+- Read receipts.
+- Sin historial de mensajes en servidor.
+- Cliente web con Web Components.
+- Interfaz minima y enfocada en privacidad.

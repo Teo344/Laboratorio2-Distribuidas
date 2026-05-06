@@ -1,15 +1,33 @@
 const STORAGE_KEYS = {
     username: 'chat.username',
-    history: 'chat.history'
+    room: 'chat.room'
 };
-const MAX_STORED_MESSAGES = 100;
+
+const TTL_OPTIONS = {
+    10: '10s',
+    60: '1min',
+    300: '5min'
+};
+
+const CHECK_SENT_ICON = `
+    <svg class="check-icon" viewBox="0 0 20 16" aria-label="Enviado" role="img">
+        <path d="M3 8.2 7.1 12.2 17 2.4" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+`;
+
+const CHECK_READ_ICON = `
+    <svg class="check-icon read" viewBox="0 0 24 16" aria-label="Leido" role="img">
+        <path d="M2.5 8.2 6.3 12 15.8 2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+        <path d="M9 8.4 12.6 12 22 2.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+`;
 
 const template = document.createElement('template');
 
 template.innerHTML = `
     <style>
         :host {
-            color: #172026;
+            color: #202124;
             display: block;
             font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
             min-height: 100vh;
@@ -20,7 +38,7 @@ template.innerHTML = `
         }
 
         .page {
-            background: #f6f7f8;
+            background: #f3f5f4;
             min-height: 100vh;
             padding: 20px;
         }
@@ -28,21 +46,21 @@ template.innerHTML = `
         .layout {
             display: grid;
             gap: 12px;
-            grid-template-columns: minmax(0, 1fr) 250px;
+            grid-template-columns: minmax(0, 1fr) 270px;
             margin: 0 auto;
-            max-width: 1080px;
+            max-width: 1100px;
         }
 
         .panel {
             background: #ffffff;
-            border: 1px solid #e5e7eb;
+            border: 1px solid #dde3e0;
             border-radius: 8px;
             overflow: hidden;
         }
 
         .header {
             align-items: center;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #dde3e0;
             display: flex;
             gap: 12px;
             justify-content: space-between;
@@ -61,24 +79,30 @@ template.innerHTML = `
             font-size: 15px;
         }
 
+        .room-label,
+        .status,
+        .message-state,
+        .expires {
+            color: #66736d;
+            font-size: 12px;
+        }
+
         .status {
             align-items: center;
             display: inline-flex;
-            font-size: 13px;
             gap: 8px;
-            color: #667085;
             white-space: nowrap;
         }
 
         .dot {
-            background: #a3aab4;
+            background: #a5aea9;
             border-radius: 50%;
             height: 8px;
             width: 8px;
         }
 
         .dot.connected {
-            background: #16a34a;
+            background: #0f8f72;
         }
 
         .messages {
@@ -93,8 +117,8 @@ template.innerHTML = `
 
         .message {
             align-self: flex-start;
-            background: #f2f4f7;
-            border: 1px solid #eef0f3;
+            background: #f1f3f2;
+            border: 1px solid #e7ece9;
             border-radius: 7px;
             max-width: min(78%, 620px);
             padding: 9px 11px;
@@ -102,16 +126,17 @@ template.innerHTML = `
 
         .message.own {
             align-self: flex-end;
-            background: #dff4e8;
-            border-color: #bfe7cf;
+            background: #e2f3ed;
+            border-color: #c5e4d9;
         }
 
         .meta {
-            color: #667085;
+            align-items: center;
+            color: #66736d;
             display: flex;
+            flex-wrap: wrap;
             font-size: 12px;
-            gap: 8px;
-            justify-content: space-between;
+            gap: 7px;
             margin-bottom: 4px;
         }
 
@@ -120,41 +145,115 @@ template.innerHTML = `
             overflow-wrap: anywhere;
         }
 
+        .expires {
+            display: grid;
+            gap: 5px;
+            margin-top: 8px;
+            min-width: 180px;
+        }
+
+        .ttl-row {
+            align-items: center;
+            display: flex;
+            gap: 6px;
+        }
+
+        .ttl-dot {
+            background: #9aa6a0;
+            border-radius: 50%;
+            height: 6px;
+            width: 6px;
+        }
+
+        .ttl-bar {
+            background: rgba(32, 33, 36, 0.1);
+            border-radius: 999px;
+            height: 3px;
+            overflow: hidden;
+        }
+
+        .ttl-progress {
+            background: #0f8f72;
+            border-radius: inherit;
+            height: 100%;
+            transition: width 0.25s linear;
+            width: 100%;
+        }
+
+        .message-state {
+            align-items: center;
+            display: inline-flex;
+            height: 15px;
+            min-width: 18px;
+        }
+
+        .check-icon {
+            color: #8a958f;
+            display: block;
+            height: 15px;
+            width: 18px;
+        }
+
+        .check-icon.read {
+            color: #0f8f72;
+        }
+
         .notice {
             align-self: center;
             background: #ffffff;
-            border: 1px solid #e5e7eb;
+            border: 1px solid #dde3e0;
             border-radius: 999px;
-            color: #667085;
+            color: #66736d;
             font-size: 13px;
             padding: 6px 12px;
+            text-align: center;
         }
 
         form {
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #dde3e0;
             display: flex;
             gap: 10px;
             padding: 12px;
         }
 
-        input {
+        .entry-form {
+            border: 0;
+            display: grid;
+            gap: 9px;
+            padding: 0;
+        }
+
+        .message-form {
+            align-items: center;
+        }
+
+        input,
+        select {
             background: #ffffff;
-            border: 1px solid #d8dde3;
+            border: 1px solid #cfd8d4;
             border-radius: 6px;
-            color: #172026;
-            flex: 1;
+            color: #202124;
             font: inherit;
             min-width: 0;
             padding: 10px 11px;
         }
 
-        input:focus {
-            border-color: #256f5c;
-            outline: 3px solid rgba(37, 111, 92, 0.13);
+        input {
+            flex: 1;
+        }
+
+        select {
+            width: 105px;
+        }
+
+        input:focus,
+        select:focus {
+            border-color: #0f8f72;
+            outline: 3px solid rgba(15, 143, 114, 0.14);
         }
 
         button {
-            background: #172026;
+            background: #202124;
             border: 0;
             border-radius: 6px;
             color: #ffffff;
@@ -167,30 +266,20 @@ template.innerHTML = `
 
         button.secondary {
             background: #ffffff;
-            border: 1px solid #d8dde3;
-            color: #344054;
+            border: 1px solid #cfd8d4;
+            color: #3f4944;
         }
 
-        button.secondary:disabled {
-            background: #f2f4f7;
-            border-color: #e5e7eb;
-            color: #98a2b3;
-        }
-
+        button.secondary:disabled,
         button:disabled {
-            background: #a3aab4;
+            background: #f2f4f7;
+            border-color: #dde3e0;
+            color: #98a39e;
             cursor: not-allowed;
         }
 
         .sidebar {
             padding: 16px;
-        }
-
-        .username-form {
-            border: 0;
-            display: grid;
-            gap: 9px;
-            padding: 0;
         }
 
         .session-actions {
@@ -200,7 +289,7 @@ template.innerHTML = `
         }
 
         .users {
-            border-top: 1px solid #e5e7eb;
+            border-top: 1px solid #dde3e0;
             display: grid;
             gap: 6px;
             margin: 0;
@@ -208,17 +297,17 @@ template.innerHTML = `
         }
 
         .user {
-            background: #f8faf9;
-            border: 1px solid #eef0f3;
+            background: #f7f9f8;
+            border: 1px solid #e7ece9;
             border-radius: 6px;
-            color: #344054;
+            color: #3f4944;
             font-size: 14px;
             list-style: none;
             overflow-wrap: anywhere;
             padding: 8px 9px;
         }
 
-        @media (max-width: 760px) {
+        @media (max-width: 780px) {
             .page {
                 padding: 12px;
             }
@@ -235,6 +324,17 @@ template.innerHTML = `
             .message {
                 max-width: 92%;
             }
+
+            .message-form {
+                align-items: stretch;
+                display: grid;
+                grid-template-columns: 1fr;
+            }
+
+            select,
+            button {
+                width: 100%;
+            }
         }
     </style>
 
@@ -242,7 +342,10 @@ template.innerHTML = `
         <section class="layout">
             <article class="panel">
                 <header class="header">
-                    <h1>Chat con WebSockets</h1>
+                    <div>
+                        <h1>Chat privado</h1>
+                        <div class="room-label" data-room-label>Sin sala activa</div>
+                    </div>
                     <span class="status">
                         <span class="dot" data-status-dot></span>
                         <span data-status-text>Desconectado</span>
@@ -251,21 +354,28 @@ template.innerHTML = `
 
                 <section class="messages" data-messages></section>
 
-                <form data-message-form>
-                    <input data-message-input type="text" placeholder="Escribe un mensaje" autocomplete="off" disabled>
+                <form class="message-form" data-message-form>
+                    <input data-message-input type="text" placeholder="Escribe un mensaje privado" autocomplete="off" disabled>
+                    <select data-ttl-select disabled>
+                        <option value="10">10s</option>
+                        <option value="60" selected>1min</option>
+                        <option value="300">5min</option>
+                    </select>
                     <button type="submit" disabled>Enviar</button>
                 </form>
             </article>
 
             <aside class="panel sidebar">
-                <form class="username-form" data-username-form>
-                    <h2>Tu usuario</h2>
+                <form class="entry-form" data-entry-form>
+                    <h2>Ingreso privado</h2>
                     <input data-username-input type="text" placeholder="Nombre de usuario" autocomplete="name">
+                    <input data-room-input type="text" placeholder="Codigo de sala" autocomplete="off">
                     <button type="submit">Entrar</button>
                 </form>
+
                 <div class="session-actions">
                     <button class="secondary" type="button" data-leave-button disabled>Salir</button>
-                    <button class="secondary" type="button" data-clear-history-button>Limpiar historial</button>
+                    <button class="secondary" type="button" data-clear-messages-button>Limpiar pantalla</button>
                 </div>
 
                 <h2>Conectados</h2>
@@ -282,95 +392,107 @@ class ChatApp extends HTMLElement {
         this.shadowRoot.appendChild(template.content.cloneNode(true));
 
         this.socket = null;
-        this.username = this.loadStoredUsername();
-        this.hasRenderedStoredHistory = false;
+        this.username = this.loadStoredValue(STORAGE_KEYS.username);
+        this.room = this.loadStoredValue(STORAGE_KEYS.room);
+        this.messageTimers = new Map();
+
         this.messages = this.shadowRoot.querySelector('[data-messages]');
         this.users = this.shadowRoot.querySelector('[data-users]');
         this.statusDot = this.shadowRoot.querySelector('[data-status-dot]');
         this.statusText = this.shadowRoot.querySelector('[data-status-text]');
-        this.usernameForm = this.shadowRoot.querySelector('[data-username-form]');
+        this.roomLabel = this.shadowRoot.querySelector('[data-room-label]');
+        this.entryForm = this.shadowRoot.querySelector('[data-entry-form]');
         this.usernameInput = this.shadowRoot.querySelector('[data-username-input]');
-        this.usernameButton = this.usernameForm.querySelector('button');
+        this.roomInput = this.shadowRoot.querySelector('[data-room-input]');
+        this.entryButton = this.entryForm.querySelector('button');
         this.leaveButton = this.shadowRoot.querySelector('[data-leave-button]');
-        this.clearHistoryButton = this.shadowRoot.querySelector('[data-clear-history-button]');
+        this.clearMessagesButton = this.shadowRoot.querySelector('[data-clear-messages-button]');
         this.messageForm = this.shadowRoot.querySelector('[data-message-form]');
         this.messageInput = this.shadowRoot.querySelector('[data-message-input]');
         this.messageButton = this.messageForm.querySelector('button');
+        this.ttlSelect = this.shadowRoot.querySelector('[data-ttl-select]');
 
         this.usernameInput.value = this.username;
+        this.roomInput.value = this.room;
+        this.updateRoomLabel();
     }
 
     connectedCallback() {
-        this.usernameForm.addEventListener('submit', this.handleUsernameSubmit);
+        this.entryForm.addEventListener('submit', this.handleEntrySubmit);
         this.messageForm.addEventListener('submit', this.handleMessageSubmit);
         this.leaveButton.addEventListener('click', this.handleLeaveClick);
-        this.clearHistoryButton.addEventListener('click', this.handleClearHistoryClick);
-        this.renderStoredHistory();
+        this.clearMessagesButton.addEventListener('click', this.handleClearMessagesClick);
         this.connectSocket();
     }
 
     disconnectedCallback() {
-        this.usernameForm.removeEventListener('submit', this.handleUsernameSubmit);
+        this.entryForm.removeEventListener('submit', this.handleEntrySubmit);
         this.messageForm.removeEventListener('submit', this.handleMessageSubmit);
         this.leaveButton.removeEventListener('click', this.handleLeaveClick);
-        this.clearHistoryButton.removeEventListener('click', this.handleClearHistoryClick);
+        this.clearMessagesButton.removeEventListener('click', this.handleClearMessagesClick);
+        this.clearAllTimers();
 
         if (this.socket) {
             this.socket.disconnect();
         }
     }
 
-    handleUsernameSubmit = (event) => {
+    handleEntrySubmit = (event) => {
         event.preventDefault();
 
         const username = this.usernameInput.value.trim();
-        if (!username || !this.socket?.connected) {
+        const room = this.roomInput.value.trim();
+        if (!username || !room || !this.socket?.connected) {
+            this.addNotice('Ingresa usuario y sala para continuar');
             return;
         }
 
         this.username = username;
-        this.saveStoredUsername(username);
-        this.socket.emit('set_username', { username });
-        this.setChatActive(true);
-        this.messageInput.focus();
-        this.addNotice(`Bienvenido, ${username}`);
+        this.room = room;
+        this.saveStoredValue(STORAGE_KEYS.username, username);
+        this.saveStoredValue(STORAGE_KEYS.room, room);
+        this.joinPrivateRoom();
     };
 
     handleMessageSubmit = (event) => {
         event.preventDefault();
 
         const message = this.messageInput.value.trim();
-        if (!message || !this.username || !this.socket?.connected) {
+        if (!message || !this.username || !this.room || !this.socket?.connected) {
             return;
         }
 
-        this.socket.emit('chat_message', {
+        this.socket.emit('private_message', {
+            messageId: crypto.randomUUID(),
             message,
-            timestamp: new Date().toLocaleTimeString()
+            timestamp: new Date().toLocaleTimeString(),
+            ttl: Number(this.ttlSelect.value)
         });
         this.messageInput.value = '';
         this.messageInput.focus();
     };
 
     handleLeaveClick = () => {
-        if (!this.username || !this.socket?.connected) {
+        if (!this.username || !this.room || !this.socket?.connected) {
             return;
         }
 
-        const username = this.username;
         this.socket.emit('leave_chat');
         this.username = '';
-        this.removeStoredUsername();
+        this.room = '';
+        this.removeStoredValue(STORAGE_KEYS.username);
+        this.removeStoredValue(STORAGE_KEYS.room);
         this.setChatActive(false);
+        this.updateRoomLabel();
         this.users.replaceChildren();
-        this.addNotice(`${username} salio del chat`);
+        this.addNotice('Saliste de la sala privada');
         this.usernameInput.focus();
     };
 
-    handleClearHistoryClick = () => {
-        this.saveStoredHistory([]);
+    handleClearMessagesClick = () => {
+        this.clearAllTimers();
         this.messages.replaceChildren();
-        this.addNotice('Historial local limpiado');
+        this.addNotice('Pantalla limpiada');
     };
 
     connectSocket() {
@@ -380,38 +502,76 @@ class ChatApp extends HTMLElement {
 
         this.socket.on('connect', () => {
             this.setConnectionStatus(true);
+            this.entryButton.disabled = false;
 
-            if (this.username) {
-                this.socket.emit('set_username', { username: this.username });
-                this.setChatActive(true);
-                this.addNotice(`Sesion restaurada como ${this.username}`);
+            if (this.username && this.room) {
+                this.joinPrivateRoom(true);
             }
         });
 
         this.socket.on('disconnect', () => {
             this.setConnectionStatus(false);
-            this.setChatActive(false, { keepUsername: true });
+            this.setChatActive(false, { keepIdentity: true });
         });
 
         this.socket.on('connect_error', () => {
             this.setConnectionStatus(false);
+            this.setChatActive(false, { keepIdentity: true });
+        });
+
+        this.socket.on('join_error', (data) => {
+            this.addNotice(data.message || 'No se pudo entrar a la sala');
+        });
+
+        this.socket.on('joined_private_room', (data) => {
+            this.username = data.username;
+            this.room = data.room;
+            this.setChatActive(true);
+            this.updateRoomLabel();
+            this.addNotice(`Entraste a la sala ${data.room}`);
+            this.messageInput.focus();
         });
 
         this.socket.on('user_joined', (data) => {
-            this.addNotice(`${data.username} se unio al chat`);
+            this.addNotice(`${data.username} entro a la sala`);
         });
 
         this.socket.on('user_left', (data) => {
-            this.addNotice(`${data.username} salio del chat`);
+            this.addNotice(`${data.username} salio de la sala`);
         });
 
-        this.socket.on('user_list', (users) => {
+        this.socket.on('room_user_list', (users) => {
             this.renderUsers(users);
         });
 
-        this.socket.on('chat_message', (data) => {
-            this.addMessage(data, data.username === this.username);
+        this.socket.on('private_message', (data) => {
+            const isOwn = data.username === this.username;
+            this.addMessage(data, isOwn);
+
+            if (!isOwn) {
+                requestAnimationFrame(() => {
+                    this.socket.emit('message_read', { messageId: data.messageId });
+                    this.markMessageAsRead(data.messageId);
+                    this.startExpirationTimer(data.messageId, Number(data.ttl));
+                });
+            }
         });
+
+        this.socket.on('message_read', (data) => {
+            this.markMessageAsRead(data.messageId, data.reader);
+            this.startExpirationTimer(data.messageId, Number(data.ttl));
+        });
+    }
+
+    joinPrivateRoom(isRestore = false) {
+        this.socket.emit('join_private_room', {
+            username: this.username,
+            room: this.room
+        });
+
+        if (isRestore) {
+            this.addNotice(`Sesion restaurada en ${this.room}`);
+        }
     }
 
     setConnectionStatus(isConnected) {
@@ -420,20 +580,28 @@ class ChatApp extends HTMLElement {
     }
 
     setChatActive(isActive, options = {}) {
-        if (!isActive && !options.keepUsername) {
+        if (!isActive && !options.keepIdentity) {
             this.usernameInput.value = '';
+            this.roomInput.value = '';
         }
 
         this.usernameInput.disabled = isActive;
-        this.usernameButton.disabled = isActive || !this.socket?.connected;
+        this.roomInput.disabled = isActive;
+        this.entryButton.disabled = isActive || !this.socket?.connected;
         this.leaveButton.disabled = !isActive;
         this.messageInput.disabled = !isActive;
         this.messageButton.disabled = !isActive;
+        this.ttlSelect.disabled = !isActive;
     }
 
-    addMessage(data, isOwn, options = {}) {
+    updateRoomLabel() {
+        this.roomLabel.textContent = this.room ? `Sala: ${this.room}` : 'Sin sala activa';
+    }
+
+    addMessage(data, isOwn) {
         const article = document.createElement('article');
         article.className = `message${isOwn ? ' own' : ''}`;
+        article.dataset.messageId = data.messageId;
 
         const meta = document.createElement('div');
         meta.className = 'meta';
@@ -444,18 +612,107 @@ class ChatApp extends HTMLElement {
         const time = document.createElement('span');
         time.textContent = data.timestamp || '';
 
+        const state = document.createElement('span');
+        state.className = 'message-state';
+        state.dataset.messageState = '';
+        state.innerHTML = isOwn ? CHECK_SENT_ICON : '';
+        state.hidden = !isOwn;
+
         const text = document.createElement('div');
         text.className = 'text';
         text.textContent = data.message;
 
-        meta.append(author, time);
-        article.append(meta, text);
+        const expires = document.createElement('div');
+        expires.className = 'expires';
+        expires.dataset.expires = '';
+        expires.innerHTML = `
+            <div class="ttl-row">
+                <span class="ttl-dot"></span>
+                <span data-expires-text></span>
+            </div>
+            <div class="ttl-bar">
+                <span class="ttl-progress" data-expires-progress></span>
+            </div>
+        `;
+        this.setExpirationWaitingState(expires, data.ttl, isOwn);
+
+        meta.append(author, time, state);
+        article.append(meta, text, expires);
         this.messages.appendChild(article);
         this.scrollToLatestMessage();
+    }
 
-        if (options.persist !== false) {
-            this.rememberMessage(data);
+    markMessageAsRead(messageId, reader) {
+        const message = this.messages.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`);
+        const state = message?.querySelector('[data-message-state]');
+
+        if (state) {
+            state.hidden = false;
+            state.innerHTML = CHECK_READ_ICON;
+            state.title = reader ? `Leido por ${reader}` : 'Leido';
         }
+    }
+
+    startExpirationTimer(messageElement, ttl) {
+        const messageId = typeof messageElement === 'string'
+            ? messageElement
+            : messageElement.dataset.messageId;
+        const target = typeof messageElement === 'string'
+            ? this.messages.querySelector(`[data-message-id="${CSS.escape(messageElement)}"]`)
+            : messageElement;
+
+        if (!target || this.messageTimers.has(messageId) || !ttl) {
+            return;
+        }
+
+        const expiresText = target.querySelector('[data-expires-text]');
+        const expiresProgress = target.querySelector('[data-expires-progress]');
+        if (!expiresText || !expiresProgress) {
+            return;
+        }
+
+        let remaining = ttl;
+
+        const renderRemaining = () => {
+            expiresText.textContent = `Se elimina en ${this.formatRemaining(remaining)}`;
+            expiresProgress.style.width = `${Math.max((remaining / ttl) * 100, 0)}%`;
+        };
+
+        renderRemaining();
+        const timer = window.setInterval(() => {
+            remaining -= 1;
+            if (remaining <= 0) {
+                window.clearInterval(timer);
+                this.messageTimers.delete(messageId);
+                target.remove();
+                return;
+            }
+
+            renderRemaining();
+        }, 1000);
+
+        this.messageTimers.set(messageId, timer);
+    }
+
+    formatRemaining(seconds) {
+        if (seconds >= 60) {
+            const minutes = Math.floor(seconds / 60);
+            const rest = seconds % 60;
+            return rest ? `${minutes}m ${rest}s` : `${minutes}m`;
+        }
+
+        return `${seconds}s`;
+    }
+
+    setExpirationWaitingState(expires, ttl, isOwn) {
+        const expiresText = expires.querySelector('[data-expires-text]');
+        const expiresProgress = expires.querySelector('[data-expires-progress]');
+        const ttlLabel = TTL_OPTIONS[ttl] || `${ttl}s`;
+
+        expiresText.textContent = isOwn
+            ? `Duracion ${ttlLabel}, inicia al ser leido`
+            : `Duracion ${ttlLabel}, pendiente de lectura`;
+        expiresProgress.style.width = '100%';
     }
 
     addNotice(message) {
@@ -481,75 +738,32 @@ class ChatApp extends HTMLElement {
         this.messages.scrollTop = this.messages.scrollHeight;
     }
 
-    renderStoredHistory() {
-        if (this.hasRenderedStoredHistory) {
-            return;
-        }
-
-        this.hasRenderedStoredHistory = true;
-        const history = this.loadStoredHistory();
-
-        history.forEach((message) => {
-            this.addMessage(message, message.username === this.username, { persist: false });
-        });
+    clearAllTimers() {
+        this.messageTimers.forEach((timer) => window.clearInterval(timer));
+        this.messageTimers.clear();
     }
 
-    rememberMessage(data) {
-        const history = this.loadStoredHistory();
-        history.push({
-            username: data.username || 'Desconocido',
-            message: data.message || '',
-            timestamp: data.timestamp || ''
-        });
-        this.saveStoredHistory(history.slice(-MAX_STORED_MESSAGES));
-    }
-
-    loadStoredUsername() {
+    loadStoredValue(key) {
         try {
-            return localStorage.getItem(STORAGE_KEYS.username) || '';
+            return localStorage.getItem(key) || '';
         } catch {
             return '';
         }
     }
 
-    saveStoredUsername(username) {
+    saveStoredValue(key, value) {
         try {
-            localStorage.setItem(STORAGE_KEYS.username, username);
+            localStorage.setItem(key, value);
         } catch {
             // localStorage puede estar bloqueado en modo privado o por politicas del navegador.
         }
     }
 
-    removeStoredUsername() {
+    removeStoredValue(key) {
         try {
-            localStorage.removeItem(STORAGE_KEYS.username);
+            localStorage.removeItem(key);
         } catch {
             // localStorage puede estar bloqueado en modo privado o por politicas del navegador.
-        }
-    }
-
-    loadStoredHistory() {
-        try {
-            const rawHistory = localStorage.getItem(STORAGE_KEYS.history);
-            const history = rawHistory ? JSON.parse(rawHistory) : [];
-
-            if (!Array.isArray(history)) {
-                return [];
-            }
-
-            return history
-                .filter((item) => item && typeof item.message === 'string')
-                .slice(-MAX_STORED_MESSAGES);
-        } catch {
-            return [];
-        }
-    }
-
-    saveStoredHistory(history) {
-        try {
-            localStorage.setItem(STORAGE_KEYS.history, JSON.stringify(history));
-        } catch {
-            // Si se supera la cuota del navegador, el chat debe seguir funcionando.
         }
     }
 }
