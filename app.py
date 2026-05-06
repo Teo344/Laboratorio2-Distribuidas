@@ -1,4 +1,5 @@
 import time
+import threading
 
 from flask import Flask, render_template, request, send_from_directory
 from flask_cors import CORS
@@ -10,9 +11,6 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = 'tu_clave_secreta_aqui'
 CORS(app)  # Permitir solicitudes desde cualquier origen en desarrollo.
 
-# Inicializar SocketIO con soporte para conexiones en tiempo real.
-# El modo threading funciona bien en desarrollo y evita depender de eventlet,
-# que no es compatible con el Python 3.14 usado por este entorno.
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
 # Diccionario para asociar el id de sesion con usuario y sala activa.
@@ -22,6 +20,9 @@ usuarios = {}
 # No se guarda el contenido del mensaje, solo datos minimos de enrutamiento.
 mensajes_activos = {}
 TTL_PERMITIDOS = {10, 60, 300}
+
+# Tiempo maximo que un mensaje no leido permanece en memoria (5 minutos).
+MAX_UNREAD_LIFETIME = 300
 
 
 @app.route('/')
@@ -117,7 +118,11 @@ def handle_private_message(data):
         'room': room,
         'ttl': ttl,
         'read_by': set(),
+        'created_at': time.time(),
     }
+
+    # Auto-limpiar si nadie lo lee en 5 minutos
+    threading.Timer(MAX_UNREAD_LIFETIME, olvidar_mensaje, args=[message_id]).start()
 
     emit('private_message', {
         'messageId': message_id,
