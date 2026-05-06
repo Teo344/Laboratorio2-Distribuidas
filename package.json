@@ -12,5 +12,13 @@
   "type": "commonjs",
   "dependencies": {
     "socket.io-client": "^4.8.3"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agcudco/websockets.git"
+  },
+  "bugs": {
+    "url": "https://github.com/agcudco/websockets/issues"
+  },
+  "homepage": "https://github.com/agcudco/websockets#readme"
 }
